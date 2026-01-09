@@ -1,0 +1,19 @@
+{
+  "name": "claude-changelog-slack-bot",
+  "version": "1.0.0",
+  "description": "Monitor Claude Code changelog and post updates to Slack",
+  "type": "module",
+  "scripts": {
+    "check": "node src/check-changelog.js"
+  },
+  "keywords": [
+    "claude",
+    "changelog",
+    "slack",
+    "bot"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

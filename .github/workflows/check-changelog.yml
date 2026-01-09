@@ -1,0 +1,33 @@
+name: Check Claude Code Changelog
+
+on:
+  schedule:
+    # Run every hour at minute 0
+    - cron: '0 * * * *'
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  check-changelog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Restore changelog cache
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: changelog-cache-${{ github.run_id }}
+          restore-keys: |
+            changelog-cache-
+
+      - name: Check for changelog updates
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: npm run check
