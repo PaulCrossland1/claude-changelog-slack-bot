@@ -1,9 +1,15 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
+import { WebClient } from '@slack/web-api';
+import 'dotenv/config';
 
 const CHANGELOG_URL = 'https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md';
 const CACHE_FILE = '.cache/last-changelog.md';
-const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
+
+const slack = SLACK_BOT_TOKEN ? new WebClient(SLACK_BOT_TOKEN) : null;
 
 async function fetchChangelog() {
   const response = await fetch(CHANGELOG_URL);
@@ -31,24 +37,17 @@ async function saveChangelog(content) {
 function parseChangelogEntries(content) {
   // Split by version headers (## [x.x.x] or ## x.x.x)
   const versionRegex = /^## \[?(\d+\.\d+\.\d+)\]?/gm;
-  const entries = [];
-  let match;
   const matches = [];
+  let match;
 
   while ((match = versionRegex.exec(content)) !== null) {
     matches.push({ version: match[1], index: match.index });
   }
 
-  for (let i = 0; i < matches.length; i++) {
-    const start = matches[i].index;
-    const end = matches[i + 1]?.index || content.length;
-    entries.push({
-      version: matches[i].version,
-      content: content.slice(start, end).trim()
-    });
-  }
-
-  return entries;
+  return matches.map((m, i) => ({
+    version: m.version,
+    content: content.slice(m.index, matches[i + 1]?.index ?? content.length).trim()
+  }));
 }
 
 function findNewEntries(currentContent, cachedContent) {
@@ -65,79 +64,127 @@ function findNewEntries(currentContent, cachedContent) {
   return currentEntries.filter(entry => !cachedVersions.has(entry.version));
 }
 
-function formatSlackMessage(entry) {
-  // Convert markdown to Slack mrkdwn format
-  let text = entry.content;
+function formatSlackBlocks(entry) {
+  // Remove the version header line (## x.x.x) since we show it in the header block
+  let lines = entry.content.split('\n').filter(line => !line.match(/^## /));
 
-  // Convert ### headers to bold
-  text = text.replace(/^### (.+)$/gm, '*$1*');
+  // Parse changelog items and group by category
+  const categories = {
+    added: { label: 'Added', items: [] },
+    fixed: { label: 'Fixed', items: [] },
+    changed: { label: 'Changed', items: [] },
+    improved: { label: 'Improved', items: [] },
+    removed: { label: 'Removed', items: [] },
+    other: { label: 'Updates', items: [] }
+  };
 
-  // Convert **bold** to *bold*
-  text = text.replace(/\*\*(.+?)\*\*/g, '*$1*');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('-')) continue;
 
-  // Convert [links](url) to <url|links>
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
+    const item = trimmed.slice(1).trim();
+    const lower = item.toLowerCase();
 
-  // Convert inline code
-  text = text.replace(/`([^`]+)`/g, '`$1`');
-
-  // Truncate if too long (Slack has limits)
-  if (text.length > 2900) {
-    text = text.slice(0, 2900) + '\n\n_(truncated - see full changelog on GitHub)_';
+    if (lower.startsWith('added') || lower.startsWith('add ') || lower.startsWith('new ') || lower.startsWith('introducing')) {
+      categories.added.items.push(item);
+    } else if (lower.startsWith('fixed') || lower.startsWith('fix ')) {
+      categories.fixed.items.push(item);
+    } else if (lower.startsWith('changed') || lower.startsWith('change ')) {
+      categories.changed.items.push(item);
+    } else if (lower.startsWith('improved') || lower.startsWith('improve ')) {
+      categories.improved.items.push(item);
+    } else if (lower.startsWith('removed') || lower.startsWith('remove ')) {
+      categories.removed.items.push(item);
+    } else {
+      categories.other.items.push(item);
+    }
   }
 
-  return {
-    blocks: [
-      {
-        type: 'header',
-        text: {
-          type: 'plain_text',
-          text: `🚀 Claude Code v${entry.version} Released`,
-          emoji: true
-        }
-      },
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: text
-        }
-      },
-      {
-        type: 'divider'
-      },
-      {
-        type: 'context',
-        elements: [
-          {
-            type: 'mrkdwn',
-            text: '<https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md|View full changelog on GitHub>'
-          }
-        ]
+  // Build blocks
+  const blocks = [
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: `:cc: Claude Code v${entry.version} :cc:`,
+        emoji: true
       }
-    ]
-  };
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'A new version of Claude Code is now available.'
+      }
+    },
+    { type: 'divider' }
+  ];
+
+  // Add each non-empty category
+  for (const cat of Object.values(categories)) {
+    if (cat.items.length === 0) continue;
+
+    // Format items - convert markdown links and bold
+    const formattedItems = cat.items.map(item => {
+      let formatted = item
+        .replace(/\*\*(.+?)\*\*/g, '*$1*')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>')
+        .replace(/`([^`]+)`/g, '`$1`');
+      return `  •  ${formatted}`;
+    });
+
+    let sectionText = `*${cat.label}*\n${formattedItems.join('\n')}`;
+
+    if (sectionText.length > 2900) {
+      sectionText = sectionText.slice(0, 2850) + '\n_...and more_';
+    }
+
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: sectionText
+      }
+    });
+  }
+
+  // Footer
+  blocks.push(
+    { type: 'divider' },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: 'Full changelog <https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md|here>'
+        }
+      ]
+    }
+  );
+
+  return blocks;
 }
 
-async function postToSlack(message) {
-  if (!SLACK_WEBHOOK_URL) {
-    console.log('SLACK_WEBHOOK_URL not set - printing message instead:');
-    console.log(JSON.stringify(message, null, 2));
+async function postToSlack(entry) {
+  const blocks = formatSlackBlocks(entry);
+
+  if (!slack || !SLACK_CHANNEL_ID) {
+    console.log('SLACK_BOT_TOKEN or SLACK_CHANNEL_ID not set - printing message instead:');
+    console.log(JSON.stringify({ blocks }, null, 2));
     return;
   }
 
-  const response = await fetch(SLACK_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(message)
+  const result = await slack.chat.postMessage({
+    channel: SLACK_CHANNEL_ID,
+    text: `Claude Code v${entry.version} Released`,
+    blocks
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to post to Slack: ${response.status} - ${text}`);
+  if (!result.ok) {
+    throw new Error(`Failed to post to Slack: ${result.error}`);
   }
 
-  console.log('Posted to Slack successfully');
+  console.log(`Posted to Slack successfully (ts: ${result.ts})`);
 }
 
 async function main() {
@@ -157,8 +204,7 @@ async function main() {
 
     // Post entries in chronological order (oldest first)
     for (const entry of newEntries.reverse()) {
-      const message = formatSlackMessage(entry);
-      await postToSlack(message);
+      await postToSlack(entry);
     }
   }
 
