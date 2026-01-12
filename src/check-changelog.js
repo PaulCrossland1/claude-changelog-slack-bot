@@ -171,7 +171,7 @@ async function postToSlack(entry) {
   if (!slack || !SLACK_CHANNEL_ID) {
     console.log('SLACK_BOT_TOKEN or SLACK_CHANNEL_ID not set - printing message instead:');
     console.log(JSON.stringify({ blocks }, null, 2));
-    return;
+    throw new Error('Cannot post to Slack: SLACK_BOT_TOKEN or SLACK_CHANNEL_ID not configured');
   }
 
   const result = await slack.chat.postMessage({
